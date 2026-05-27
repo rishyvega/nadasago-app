@@ -6,8 +6,10 @@ from pyzbar.pyzbar import decode
 from PIL import Image
 import io
 import datetime
+# 1. IMPORTAR EL CONECTOR OFICIAL DE GOOGLE SHEETS
+from streamlit_gsheets import GSheetsConnection
 
-# Configuración de página orientada a móviles
+# Configuración de página orientada a mobiles
 st.set_page_config(page_title="NadasaGO", layout="centered", initial_sidebar_state="collapsed")
 
 # CSS para desactivar el pull-to-refresh en Android y estilizar componentes
@@ -22,13 +24,33 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Inicializar Base de Datos Simplificada en Memoria (Session State)
+# 2. INICIALIZAR LA CONEXIÓN A GOOGLE SHEETS
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+# Inicializar Estados de Página y Variables Temporales de Sesión
 if 'page' not in st.session_state: st.session_state.page = 'Menu'
-if 'tiendas' not in st.session_state: st.session_state.tiendas = pd.DataFrame(columns=['Nombre', 'Lat', 'Lon'])
-if 'inventario' not in st.session_state: st.session_state.inventario = pd.DataFrame(columns=['Codigo', 'Cantidad'])
 if 'entregas_temp' not in st.session_state: st.session_state.entregas_temp = []
-if 'historial' not in st.session_state: st.session_state.historial = pd.DataFrame(columns=['Fecha', 'Tienda', 'Codigo', 'Cantidad'])
 if 'temp_click' not in st.session_state: st.session_state.temp_click = None
+
+# 3. CARGAR DATOS DESDE GOOGLE SHEETS AL SESSION STATE (Evita perder datos al navegar)
+if 'tiendas' not in st.session_state:
+    try:
+        st.session_state.tiendas = conn.read(worksheet="Tiendas")
+    except Exception:
+        st.session_state.tiendas = pd.DataFrame(columns=['Nombre', 'Lat', 'Lon'])
+
+if 'inventario' not in st.session_state:
+    try:
+        st.session_state.inventario = conn.read(worksheet="Inventario")
+    except Exception:
+        st.session_state.inventario = pd.DataFrame(columns=['Codigo', 'Cantidad'])
+
+if 'historial' not in st.session_state:
+    try:
+        st.session_state.historial = conn.read(worksheet="Historial")
+    except Exception:
+        st.session_state.historial = pd.DataFrame(columns=['Fecha', 'Tienda', 'Codigo', 'Cantidad'])
+
 
 def go_to(page):
     st.session_state.page = page
@@ -96,19 +118,27 @@ elif st.session_state.page == 'Tiendas':
             lat, lon = st.session_state.temp_click
             nueva_tienda = pd.DataFrame([{'Nombre': nombre_tienda, 'Lat': lat, 'Lon': lon}])
             st.session_state.tiendas = pd.concat([st.session_state.tiendas, nueva_tienda], ignore_index=True)
-            st.success(f"¡Tienda '{nombre_tienda}' registrada exitosamente!")
+            
+            # GUARDAR EN GOOGLE SHEETS
+            conn.update(worksheet="Tiendas", data=st.session_state.tiendas)
+            
+            st.success(f"¡Tienda '{nombre_tienda}' registrada exitosamente en Sheets!")
             st.session_state.temp_click = None 
             st.rerun()
             
     st.write("---")
     st.write("### 📝 Editar / Modificar Tiendas")
-    st.session_state.tiendas = st.data_editor(st.session_state.tiendas, num_rows="dynamic", use_container_width=True)
+    tiendas_editadas = st.data_editor(st.session_state.tiendas, num_rows="dynamic", use_container_width=True)
+    # Detectar cambios manuales en el editor de datos y subirlos a Sheets
+    if not tiendas_editadas.equals(st.session_state.tiendas):
+        st.session_state.tiendas = tiendas_editadas
+        conn.update(worksheet="Tiendas", data=st.session_state.tiendas)
+        st.rerun()
 
 # --- MÓDULO: DAR DE ALTA INVENTARIO ---
 elif st.session_state.page == 'Alta_Inventario':
     st.header("📥 Alta de Inventario")
     
-    # Escáner dual: Cámara o Entrada manual
     camara_inv = st.camera_input("📷 Escanear Código de Barras")
     codigo_manual_inv = st.text_input("✍️ O ingresa el código manualmente")
     cant_inv = st.number_input("🔢 Cantidad", min_value=1, step=1, value=1)
@@ -126,21 +156,28 @@ elif st.session_state.page == 'Alta_Inventario':
     if st.button("💾 Guardar en Inventario", use_container_width=True):
         codigo_final_inv = codigo_detectado_inv or codigo_manual_inv
         if codigo_final_inv:
-            # Buscar coincidencia exacta de código de barras
             idx = st.session_state.inventario.index[st.session_state.inventario['Codigo'] == codigo_final_inv].tolist()
             if idx:
                 st.session_state.inventario.loc[idx[0], 'Cantidad'] += cant_inv
             else:
                 nuevo_item = pd.DataFrame([{'Codigo': codigo_final_inv, 'Cantidad': cant_inv}])
                 st.session_state.inventario = pd.concat([st.session_state.inventario, nuevo_item], ignore_index=True)
-            st.success(f"¡Código {codigo_final_inv} actualizado con +{cant_inv} unidades!")
+            
+            # GUARDAR EN GOOGLE SHEETS
+            conn.update(worksheet="Inventario", data=st.session_state.inventario)
+            
+            st.success(f"¡Código {codigo_final_inv} actualizado con +{cant_inv} unidades en Sheets!")
             st.rerun()
         else:
             st.error("Debes ingresar un código de barras de forma manual o mediante la cámara.")
             
     st.write("---")
     st.write("### 📝 Modificar / Eliminar Inventario Directamente")
-    st.session_state.inventario = st.data_editor(st.session_state.inventario, num_rows="dynamic", use_container_width=True)
+    inventario_editado = st.data_editor(st.session_state.inventario, num_rows="dynamic", use_container_width=True)
+    if not inventario_editado.equals(st.session_state.inventario):
+        st.session_state.inventario = inventario_editado
+        conn.update(worksheet="Inventario", data=st.session_state.inventario)
+        st.rerun()
 
 # --- MÓDULO: REGISTRAR ENTREGA ---
 elif st.session_state.page == 'Entrega':
@@ -168,12 +205,10 @@ elif st.session_state.page == 'Entrega':
         if st.button("➕ Agregar Producto a la Lista", use_container_width=True):
             codigo_final = codigo_detectado or codigo_manual
             if codigo_final:
-                # VALIDACIÓN 1: Verificar si el código existe en el inventario maestro
                 idx = st.session_state.inventario.index[st.session_state.inventario['Codigo'] == codigo_final].tolist()
                 if not idx:
                     st.error(f"❌ El item con el código '{codigo_final}' no existe en el inventario.")
                 else:
-                    # VALIDACIÓN 2: Verificar disponibilidad restando lo ya escaneado en esta sesión
                     cant_maestra = st.session_state.inventario.loc[idx[0], 'Cantidad']
                     ya_en_lista = st.session_state.entregas_temp.count(codigo_final)
                     
@@ -207,11 +242,15 @@ elif st.session_state.page == 'Entrega':
                         idx = st.session_state.inventario.index[st.session_state.inventario['Codigo'] == cod].tolist()
                         if idx:
                             st.session_state.inventario.loc[idx[0], 'Cantidad'] -= qty
-                            nuevo_hist = pd.DataFrame([{'Fecha': datetime.datetime.now(), 'Tienda': tienda_seleccionada, 'Codigo': cod, 'Cantidad': qty}])
+                            nuevo_hist = pd.DataFrame([{'Fecha': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'Tienda': tienda_seleccionada, 'Codigo': cod, 'Cantidad': qty}])
                             st.session_state.historial = pd.concat([st.session_state.historial, nuevo_hist], ignore_index=True)
                     
+                    # GUARDAR CAMBIOS DE STOCK E HISTORIAL EN GOOGLE SHEETS
+                    conn.update(worksheet="Inventario", data=st.session_state.inventario)
+                    conn.update(worksheet="Historial", data=st.session_state.historial)
+                    
                     st.session_state.entregas_temp = []
-                    st.success("✅ Entrega completada y stock deducido del inventario.")
+                    st.success("✅ Entrega completada. Stock e Historial actualizados en Sheets.")
                     st.rerun()
 
 # --- MÓDULO: INVENTARIOS ---
@@ -219,7 +258,11 @@ elif st.session_state.page == 'Inventario':
     st.header("📊 Inventario Actual (Solo Códigos)")
     st.info("💡 Haz clic en el encabezado de cualquier columna para ordenar de forma ascendente/descendente.")
     
-    st.session_state.inventario = st.data_editor(st.session_state.inventario, num_rows="dynamic", use_container_width=True)
+    inventario_editado = st.data_editor(st.session_state.inventario, num_rows="dynamic", use_container_width=True)
+    if not inventario_editado.equals(st.session_state.inventario):
+        st.session_state.inventario = inventario_editado
+        conn.update(worksheet="Inventario", data=st.session_state.inventario)
+        st.rerun()
 
 # --- MÓDULO: TENDENCIA ---
 elif st.session_state.page == 'Tendencia':
@@ -247,11 +290,14 @@ elif st.session_state.page == 'Tendencia':
             
         resumen = df_hist.groupby('Periodo_Grafica')['Cantidad'].sum().reset_index()
         
-        # Gráfica de barras vertical nativa desde cero para arriba
         st.bar_chart(resumen.set_index('Periodo_Grafica'))
         
         st.write("### 📝 Historial General Modificable")
-        st.session_state.historial = st.data_editor(st.session_state.historial, num_rows="dynamic", use_container_width=True)
+        historial_editado = st.data_editor(st.session_state.historial, num_rows="dynamic", use_container_width=True)
+        if not historial_editado.equals(st.session_state.historial):
+            st.session_state.historial = historial_editado
+            conn.update(worksheet="Historial", data=st.session_state.historial)
+            st.rerun()
         
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
